@@ -153,7 +153,7 @@ th{color:var(--muted);font-weight:700;letter-spacing:.1em;text-transform:upperca
 
 <script>
 (() => {
-const W = 960, H = 540, FLOOR = 452, ROUND_TIME = 60, MIN_GAP = 96;
+const W = 960, H = 540, FLOOR = 452, ROUND_TIME = 60, MIN_GAP = 112;
 
 /* Cut-out rig for painted fighter art. Coordinates are pixels in the source image: joints (S shoulder,
    E elbow, G glove centre), polygons that cut each arm piece out, and an underlay that fills the holes
@@ -190,12 +190,18 @@ const ART_BLUE_LAYERED = {
   cap:[[225,330],[300,305],[390,320],[410,380],[390,440],[330,455],[260,450],[225,420]],
 };
 
+/* Hand-drawn sprite sheets, prepared by tools/sprite-prep.html: one WebP strip per animation and an
+   index of frames ([x, y, w, h, anchorX, anchorY] in strip pixels; the anchor sits on the fighter's spot
+   on the floor). `height` is how tall the idle drawing stands in the ring. */
+const SPRITES_JACK = { base:'art/jack/', height:258,
+  peaks:{ upper:3, 'body-upper':3, 'body-hook':3 } };  // contact frames that don't reach furthest forward
+
 const STYLES = {
   speed:    { name:'Rico Vane',  nick:'The Wire',    label:'Speed',    spd:1.22, dmg:.82, move:1.25, stamCost:.85,
               trunks:'#2ec4b6', trim:'#e9fffb', gloves:'#0f6f6a', skin:'#c68642', hair:'#1b1410', stats:[5,2,4],
               sig:{ name:'Wire Flurry', fast:1.5, seq:[['jab',5],['cross',5],['jab',5],['cross',6],['hook',8]] } },
-  balanced: { name:'Dani Holt',  nick:'Lighthouse',  label:'Balanced', spd:1, dmg:1, move:1.05, stamCost:1,
-              trunks:'#2457d6', trim:'#f2b632', gloves:'#1f4fc4', skin:'#eab07a', hair:'#e8c547', stats:[4,3,4], art:ART_BLUE_LAYERED,
+  balanced: { name:'Jack Rowan', nick:'Lighthouse',  label:'Balanced', spd:1, dmg:1, move:1.05, stamCost:1,
+              trunks:'#2457d6', trim:'#f2b632', gloves:'#1f4fc4', skin:'#eab07a', hair:'#e8c547', stats:[4,3,4], sprites:SPRITES_JACK,
               sig:{ name:'Crossfire', seq:[['cross',13],['hook',17]] } },
   power:    { name:'Otis Crane', nick:'Big Weather', label:'Power',    spd:.86, dmg:1.35, move:.9, stamCost:1.15,
               trunks:'#e63946', trim:'#ffd6d9', gloves:'#2d2d2d', skin:'#7a4a24', hair:'#0d0b0a', stats:[2,5,3],
@@ -474,12 +480,13 @@ function startAttack(f, m, body, sig) {
 function beginStep(f) {
   const a = f.atk, s = a.seq[a.i];
   a.t = 0; a.resolved = false; f.thrown++;
+  s.variant = Math.random() < .5;  // sprite fighters alternate between their two jab drawings
   f.stam = Math.max(0, f.stam - MOVES[s.m].stam * f.st.stamCost * (s.sig ? .5 : 1));
   const o = other(f); if (o.ai) o.reactT = DIFF[G.diff].react;
 }
 function startSlip(f) {
   if (f.stam < 5) return;
-  f.state = 'slip'; f.slipT = .34 / Math.sqrt(f.st.spd); f.stam -= 5; f.x -= f.dir * 22; f.atk = null;
+  f.state = 'slip'; f.slipT = f.slipMax = .34 / Math.sqrt(f.st.spd); f.stam -= 5; f.x -= f.dir * 22; f.atk = null;
 }
 function handPos(f, s) {
   const k = skel(STRIKE[s.m][s.body ? 1 : 0]), h = (MOVES[s.m].arm === 'L' ? k.L : k.R)[2];
@@ -492,6 +499,7 @@ function resolve(f, o, s) {
   if (o.state === 'block' && !s.body && !s.unblockable) {
     o.stam = Math.max(0, o.stam - 3 * f.st.dmg); o.hp -= 1; o.x += f.dir * 6;
     spark(hand.x, hand.y, '#cfd6e3', 5); sfx.block(); if (!o.ai) rumble(.25, 60);
+    o.blockHitT = .25;
     return;
   }
   let dmg = s.dmg * f.st.dmg * (f.stam < 15 ? .65 : 1);
@@ -501,6 +509,7 @@ function resolve(f, o, s) {
   else { o.hp -= dmg; o.stam = Math.max(0, o.stam - dmg * .4); }
   f.sp = Math.min(100, f.sp + dmg * 1.4); f.landed++; f.score += dmg + (counter ? 3 : 0); f.counterT = 0;
   o.state = 'hit'; o.atk = null; o.buf = null; o.stun = M.stun * (counter ? 1.4 : 1) * (s.sig ? 1.3 : 1); o.flash = 1;
+  o.stunMax = o.stun; o.bigHit = counter || dmg >= 12;
   o.x += f.dir * (6 + dmg * .8);
   spark(hand.x, hand.y, s.sig ? '#ffd166' : '#fff3d6', 8 + (dmg | 0));
   const big = dmg >= 12;
@@ -528,7 +537,7 @@ function updateKD(dt) {
   const home = d === G.p1 ? 720 : 240;
   up.x += (home - up.x) * Math.min(1, dt * 2);
   if (d.getUp >= 100 && k.count >= 3) {
-    d.state = 'idle'; d.hp = Math.max(20, 46 - d.kd * 12); d.stam = Math.max(d.stam, 50); G.kd = null;
+    d.state = 'idle'; d.hp = Math.max(20, 46 - d.kd * 12); d.stam = Math.max(d.stam, 50); G.kd = null; d.riseT = .5;
     say('BACK UP', d.x, 260, '#9ad1ff');
   }
 }
@@ -553,7 +562,7 @@ function nextRound() {
 function endFight(w, how) {
   const l = w ? other(w) : null;
   if (w) { w.state = 'win'; w.atk = null; w.buf = null; }
-  if (l && how !== 'DECISION') l.state = 'ko';
+  if (l) { l.state = how === 'DECISION' ? 'lose' : 'ko'; l.atk = null; l.buf = null; }
   G.phase = 'over'; G.result = { w, l, how, round:G.round };
   G.endT = how === 'DECISION' ? 1.4 : 2.6;
   G.banner = { text:how === 'DECISION' ? (w ? 'Decision' : 'Draw') : how, sub:'' }; G.bannerT = G.endT;
@@ -619,6 +628,8 @@ function aiControl(f, o, dt) {
 function updateFighter(f, o, dt, now) {
   const maxSt = Math.max(50, 100 - f.bodyDmg * .35);
   f.counterT = Math.max(0, f.counterT - dt); f.flash = Math.max(0, f.flash - dt * 4);
+  f.riseT = Math.max(0, (f.riseT || 0) - dt); f.blockHitT = Math.max(0, (f.blockHitT || 0) - dt);
+  if (f.state !== f.lastState) { f.lastState = f.state; f.stateT = 0; } else f.stateT += dt;  // time in the current state
   if (f.state === 'idle' || f.state === 'block') f.stam = Math.min(maxSt, f.stam + (f.state === 'block' ? 5 : 14) * dt);
   let tgt = GUARD, k = 16;
   switch (f.state) {
@@ -634,6 +645,7 @@ function updateFighter(f, o, dt, now) {
     case 'down': f.fall = Math.min(1, f.fall + dt * 3); tgt = HIT; break;
     case 'ko': f.fall = Math.min(1, f.fall + dt * 2.4); tgt = HIT; break;
     case 'win': tgt = P({ ...WIN, crouch:Math.abs(Math.sin(now * 6)) * .12 }); break;
+    case 'lose': tgt = P({ lean:.25, crouch:.25, aL1:1.45, aL2:-.5, aR1:1.55, aR2:-.5, head:4 }); break;
   }
   f.pose = mix(f.pose, tgt, 1 - Math.exp(-dt * k));
 }
@@ -773,6 +785,69 @@ function loadArt(A) {
   img.src = A.src;
 }
 for (const k in STYLES) if (STYLES[k].art) (STYLES[k].art.layered ? loadLayeredArt : loadArt)(STYLES[k].art);
+for (const k in STYLES) if (STYLES[k].sprites) loadSprites(STYLES[k].sprites);
+
+function loadSprites(S) {
+  fetch(S.base + 'index.json').then(r => r.json()).then(index => {
+    const names = Object.keys(index.anims);
+    let left = names.length;
+    S.anims = {};
+    for (const n of names) {
+      const a = index.anims[n], img = new Image();
+      // peak = the frame that reaches furthest forward; punches land on it
+      const peak = S.peaks && n in S.peaks ? S.peaks[n]
+        : a.frames.reduce((best, f, i, all) => (f[2] - f[4] > all[best][2] - all[best][4] ? i : best), 0);
+      S.anims[n] = { img, frames:a.frames, peak };
+      img.onload = () => { if (!--left) { S.scale = S.height / index.anims.idle.frames[0][3]; S.ready = true; } };
+      img.src = S.base + a.file;
+    }
+  }).catch(() => {});  // without the sheets the fighter falls back to the drawn stick figure
+}
+
+const BODY_ANIM = { jab:'body-jab', cross:'body-cross', hook:'body-hook', upper:'body-upper' };
+// Which animation and frame a sprite fighter shows right now.
+function spriteFrame(f, now) {
+  const A = f.st.sprites.anims, loop = (name, fps, back) => {
+    const n = A[name].frames.length, i = Math.floor(now * fps) % n;
+    return [name, back ? n - 1 - i : i];
+  };
+  const once = (name, p) => [name, Math.min(A[name].frames.length - 1, Math.max(0, Math.floor(p * A[name].frames.length)))];
+  switch (f.state) {
+    case 'attack': {
+      const s = f.atk.seq[f.atk.i];
+      const name = s.body ? BODY_ANIM[s.m] : s.m === 'jab' && s.variant ? 'jab-stiff' : s.m;
+      const a = A[name], n = a.frames.length, t = f.atk.t;
+      // wind-up plays the frames before the peak, the hit holds the peak, recovery plays the rest
+      if (t < s.wind) return [name, Math.min(a.peak - 1, Math.floor(t / s.wind * a.peak))];
+      if (t < s.wind + s.act || a.peak === n - 1) return [name, a.peak];
+      const p = (t - s.wind - s.act) / s.rec;
+      return [name, Math.min(n - 1, a.peak + 1 + Math.floor(p * (n - 1 - a.peak)))];
+    }
+    case 'block': return f.blockHitT > 0 ? once('block-hit', 1 - f.blockHitT / .25) : once('block', f.stateT / .15);
+    case 'slip': return once('slip', 1 - f.slipT / (f.slipMax || .3));
+    case 'hit': return once(f.bigHit ? 'stunned' : 'hit', 1 - f.stun / (f.stunMax || .3));
+    case 'down': case 'ko': return once('down', f.stateT / .7);
+    case 'win': return loop('win', 5);
+    case 'lose': return once('lose', f.stateT / .9);
+    default:
+      if (f.riseT > 0) return once('get-up', 1 - f.riseT / .5);
+      if (f.move) return loop('walk', 10, f.move * f.dir < 0);
+      if (f.stam < 12) return loop('stunned', 5);
+      return loop('idle', 8);
+  }
+}
+function drawSprite(f, now) {
+  const S = f.st.sprites, [name, i] = spriteFrame(f, now), a = S.anims[name], [x, y, w, h, ax, ay] = a.frames[i], s = S.scale;
+  const dx = -ax * s, dy = FLOOR - ay * s;
+  if (f.sp >= 100 || (f.atk && f.atk.seq[0].sig)) { ctx.shadowColor = '#f2b632'; ctx.shadowBlur = 18; }
+  ctx.drawImage(a.img, x, y, w, h, dx, dy, w * s, h * s);
+  ctx.shadowBlur = 0;
+  if (f.flash > 0) {
+    ctx.globalAlpha = f.flash * .5; ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(a.img, x, y, w, h, dx, dy, w * s, h * s);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  }
+}
 
 // Removes a flat green background and the green tint it leaves on edges.
 function keyGreen(d) {
@@ -933,6 +1008,7 @@ function drawFighter(f, now) {
   ctx.save(); ctx.translate(f.x, 0);
   ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.ellipse(f.dir * (f.fall * -60), FLOOR - 2, 70 + f.fall * 40, 9, 0, 0, Math.PI * 2); ctx.fill();
   ctx.scale(f.dir, 1);
+  if (st.sprites && st.sprites.ready) { drawSprite(f, now); ctx.restore(); return; }
   if (f.fall > 0) { ctx.translate(-46, FLOOR); ctx.rotate(-f.fall * 1.45); ctx.translate(46, -FLOOR); }
   if (st.art && st.art.layers) { drawArt(f); ctx.restore(); return; }
   // rear arm and leg sit behind the body
@@ -1012,7 +1088,8 @@ function render(now) {
   ctx.translate(view.ox + sx, view.oy + sy); ctx.scale(view.s, view.s);
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
   drawArena(now);
-  if (G.p1) { drawFighter(G.p2, now); drawFighter(G.p1, now); }
+  // whoever is punching is drawn on top, so the glove lands in front of the target
+  if (G.p1) { const [back, front] = G.p2.state === 'attack' && G.p1.state !== 'attack' ? [G.p1, G.p2] : [G.p2, G.p1]; drawFighter(back, now); drawFighter(front, now); }
   for (const p of G.parts) { ctx.globalAlpha = 1 - p.t / p.life; ctx.fillStyle = p.c; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
   ctx.globalAlpha = 1;
   ctx.textAlign = 'center';

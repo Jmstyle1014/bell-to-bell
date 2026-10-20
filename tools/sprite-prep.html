@@ -1,0 +1,186 @@
+<!doctype html><meta charset="utf-8"><title>Sprite prep</title>
+<body style="margin:0;background:#3a3f4a;color:#eee;font:14px system-ui">
+<canvas id="c"></canvas>
+<script>
+// Turns raw sprite sheets (frames side by side on a flat background) into game-ready sheets:
+// background removed, frames sliced, lined up on the feet, scaled to one size, saved as WebP + JSON.
+const load = src => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
+const pixels = img => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const g = c.getContext('2d'); g.drawImage(img, 0, 0); return g.getImageData(0, 0, c.width, c.height); };
+
+// Background stats: median colour of the border and how much it varies.
+function bgStats(d) {
+  const { width: w, height: h, data } = d, s = [];
+  for (let x = 0; x < w; x += 7) for (const y of [2, h - 3]) { const i = (y * w + x) * 4; s.push([data[i], data[i + 1], data[i + 2]]); }
+  for (let y = 0; y < h; y += 7) for (const x of [2, w - 3]) { const i = (y * w + x) * 4; s.push([data[i], data[i + 1], data[i + 2]]); }
+  const med = [0, 1, 2].map(k => s.map(p => p[k]).sort((a, b) => a - b)[s.length >> 1]);
+  const dev = s.map(p => Math.abs(p[0] - med[0]) + Math.abs(p[1] - med[1]) + Math.abs(p[2] - med[2])).sort((a, b) => a - b);
+  return { med, p50: dev[dev.length >> 1], p95: dev[Math.floor(dev.length * .95)], max: dev[dev.length - 1] };
+}
+
+// Clears everything connected to the border that is within `tol` of the background colour.
+function clearBackground(d, bg, tol) {
+  const { width: w, height: h, data } = d, seen = new Uint8Array(w * h), q = new Int32Array(w * h);
+  let head = 0, tail = 0;
+  const near = i => Math.abs(data[i * 4] - bg[0]) + Math.abs(data[i * 4 + 1] - bg[1]) + Math.abs(data[i * 4 + 2] - bg[2]) <= tol;
+  const push = i => { if (!seen[i] && near(i)) { seen[i] = 1; q[tail++] = i; } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (head < tail) {
+    const i = q[head++], x = i % w;
+    data[i * 4 + 3] = 0;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (i >= w) push(i - w); if (i < w * (h - 1)) push(i + w);
+  }
+  // soften the one-pixel rim that still carries background colour
+  for (let i = 0; i < w * h; i++) {
+    if (!data[i * 4 + 3]) continue;
+    const x = i % w;
+    const touching = (x > 0 && !data[(i - 1) * 4 + 3]) || (x < w - 1 && !data[(i + 1) * 4 + 3]) || (i >= w && !data[(i - w) * 4 + 3]) || (i < w * (h - 1) && !data[(i + w) * 4 + 3]);
+    if (touching && Math.abs(data[i * 4] - bg[0]) + Math.abs(data[i * 4 + 1] - bg[1]) + Math.abs(data[i * 4 + 2] - bg[2]) < tol * 2.5) data[i * 4 + 3] = 110;
+  }
+}
+
+// Splits the sheet into frames at fully transparent columns; drops specks.
+function sliceFrames(d) {
+  const { width: w, height: h, data } = d, col = new Uint16Array(w);
+  for (let x = 0; x < w; x++) { let n = 0; for (let y = 0; y < h; y++) if (data[(y * w + x) * 4 + 3] > 128) n++; col[x] = n; }
+  const runs = []; let start = -1;
+  for (let x = 0; x <= w; x++) {
+    const on = x < w && col[x] > 1;
+    if (on && start < 0) start = x;
+    if (!on && start >= 0) { runs.push([start, x]); start = -1; }
+  }
+  // merge runs split by narrow gaps (< 6px), then drop thin specks (< 25px wide)
+  const merged = [];
+  for (const r of runs) { const last = merged[merged.length - 1]; if (last && r[0] - last[1] < 6) last[1] = r[1]; else merged.push([...r]); }
+  return merged.filter(r => r[1] - r[0] >= 25).map(([x0, x1]) => {
+    let y0 = h, y1 = 0;
+    for (let y = 0; y < h; y++) for (let x = x0; x < x1; x++) if (data[(y * w + x) * 4 + 3] > 128) { if (y < y0) y0 = y; y1 = y; break; }
+    // the sole: lowest row with a real run of pixels; feet x = centre of the bottom 10% of the figure
+    let sole = y1;
+    for (let y = y1; y > y0; y--) { let n = 0; for (let x = x0; x < x1; x++) if (data[(y * w + x) * 4 + 3] > 128) n++; if (n >= 6) { sole = y; break; } }
+    let sx = 0, sn = 0;
+    for (let y = sole - Math.round((sole - y0) * .1); y <= sole; y++) for (let x = x0; x < x1; x++) if (data[(y * w + x) * 4 + 3] > 128) { sx += x; sn++; }
+    return { x0, x1, y0, y1: y1 + 1, sole, footX: sn ? sx / sn : (x0 + x1) / 2 };
+  });
+}
+
+// Splits the sheet into `want` frames by connected shapes (so a glove reaching over the next frame's
+// columns doesn't merge them). The `want` largest shapes are frames; smaller bits join the nearest frame.
+function splitFrames(d, want) {
+  const { width: w, height: h, data } = d, lab = new Int32Array(w * h), q = new Int32Array(w * h), comps = [];
+  for (let s = 0; s < w * h; s++) {
+    if (lab[s] || data[s * 4 + 3] <= 128) continue;
+    const id = comps.length + 1, c = { id, n: 0, x0: w, x1: 0, y0: h, y1: 0, sx: 0 };
+    let head = 0, tail = 0; q[tail++] = s; lab[s] = id;
+    while (head < tail) {
+      const i = q[head++], x = i % w, y = (i - x) / w;
+      c.n++; c.sx += x; if (x < c.x0) c.x0 = x; if (x > c.x1) c.x1 = x; if (y < c.y0) c.y0 = y; if (y > c.y1) c.y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const j = yy * w + xx; if (!lab[j] && data[j * 4 + 3] > 128) { lab[j] = id; q[tail++] = j; }
+      }
+    }
+    comps.push(c);
+  }
+  comps.sort((a, b) => b.n - a.n);
+  const frames = comps.slice(0, want).sort((a, b) => a.sx / a.n - b.sx / b.n);
+  const owner = new Map(frames.map((f, k) => [f.id, k]));
+  for (const c of comps.slice(want)) {
+    if (c.n < 40) { owner.set(c.id, -1); continue; }
+    const cx = c.sx / c.n; let best = 0, bd = 1e9;
+    frames.forEach((f, k) => { const dd = cx < f.x0 ? f.x0 - cx : cx > f.x1 ? cx - f.x1 : 0; if (dd < bd) { bd = dd; best = k; } });
+    owner.set(c.id, best);
+    const f = frames[best]; f.x0 = Math.min(f.x0, c.x0); f.x1 = Math.max(f.x1, c.x1); f.y0 = Math.min(f.y0, c.y0); f.y1 = Math.max(f.y1, c.y1);
+  }
+  return { frames, lab, owner };
+}
+
+// Per frame: sole (lowest solid row), feet centre, and the waistband row (widest gold run in the lower 70%).
+function measure(d, split, k) {
+  const { width: w, data } = d, f = split.frames[k], mine = i => split.owner.get(split.lab[i]) === k && data[i * 4 + 3] > 128;
+  let sole = f.y1;
+  for (let y = f.y1; y > f.y0; y--) { let n = 0; for (let x = f.x0; x <= f.x1; x++) if (mine(y * w + x)) n++; if (n >= 6) { sole = y; break; } }
+  let sx = 0, sn = 0;
+  for (let y = sole - Math.round((sole - f.y0) * .1); y <= sole; y++) for (let x = f.x0; x <= f.x1; x++) if (mine(y * w + x)) { sx += x; sn++; }
+  let waist = null, best = 0;
+  for (let y = f.y0 + Math.round((sole - f.y0) * .3); y < sole; y++) {
+    let n = 0;
+    for (let x = f.x0; x <= f.x1; x++) {
+      const i = y * w + x; if (!mine(i)) continue;
+      const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+      if (r > 160 && g > 110 && b < 110 && r - b > 90 && r - g < 90) n++;
+    }
+    if (n > best) { best = n; waist = y; }
+  }
+  return { sole, footX: sn ? sx / sn : (f.x0 + f.x1) / 2, waist: best >= 25 ? waist : null, height: sole - f.y0 };
+}
+
+// Area of blond hair in a frame. The hair is about the same size in every pose, so its square root
+// is a stand-in for how large the sheet drew him.
+function hairArea(d, split, k) {
+  const { width: w, data } = d, f = split.frames[k];
+  let n = 0;
+  for (let y = f.y0; y <= f.y1; y++) for (let x = f.x0; x <= f.x1; x++) {
+    const i = y * w + x; if (split.owner.get(split.lab[i]) !== k || data[i * 4 + 3] <= 128) continue;
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    if (r > 200 && g > 165 && b < 140 && r - b > 100) n++;
+  }
+  return n;
+}
+
+// Rear heel x: leftmost solid pixel in the bottom 6% of the frame. The back foot stays planted in most
+// moves, so lining frames up on it keeps him from sliding about.
+function rearHeel(d, split, k, sole) {
+  const { width: w, data } = d, f = split.frames[k], top = sole - Math.round((sole - f.y0) * .06);
+  let hx = f.x1;
+  for (let y = top; y <= sole; y++) for (let x = f.x0; x <= f.x1; x++) {
+    const i = y * w + x; if (split.owner.get(split.lab[i]) === k && data[i * 4 + 3] > 128) { if (x < hx) hx = x; break; }
+  }
+  return hx;
+}
+
+const put = (path, body, type) => fetch(path, { method:'PUT', body, headers:{ 'Content-Type':type } }).then(r => { if (!r.ok) throw new Error(path + ' ' + r.status); });
+
+// Builds every animation: one WebP strip per move plus a JSON index of frame rectangles and anchors.
+// Anchors are the point that sits on the fighter's position on the floor.
+// `outScale` sets the output size (1 = as drawn in the idle sheet); each sheet is matched to the idle
+// sheet by hair size, unless it sets `hair: false` (lying-down sheets, where the hair reads smaller).
+async function build({ src, out, anims, refHair, outScale, quality = .85 }) {
+  const index = { anims:{} };
+  let centreFromHeel = null;
+  for (const [name, a] of Object.entries(anims)) {
+    const img = await load(src + a.file), d = pixels(img), bg = bgStats(d).med;
+    clearBackground(d, bg, 14);
+    const sp = splitFrames(d, a.frames);
+    const hairs = sp.frames.map((f, k) => Math.sqrt(hairArea(d, sp, k))).sort((x, y) => x - y);
+    const s = outScale * (a.hair === false ? 1 : refHair / hairs[hairs.length >> 1]);
+    const frames = [];
+    sp.frames.forEach((f, k) => {
+      const m = measure(d, sp, k), heel = rearHeel(d, sp, k, m.sole);
+      // keep only this frame's own pixels
+      const fd = new ImageData(f.x1 - f.x0 + 1, f.y1 - f.y0 + 1);
+      for (let y = f.y0; y <= f.y1; y++) for (let x = f.x0; x <= f.x1; x++) {
+        const i = y * d.width + x, j = ((y - f.y0) * fd.width + (x - f.x0)) * 4;
+        if (sp.owner.get(sp.lab[i]) !== k) continue;
+        fd.data[j] = d.data[i * 4]; fd.data[j + 1] = d.data[i * 4 + 1]; fd.data[j + 2] = d.data[i * 4 + 2]; fd.data[j + 3] = d.data[i * 4 + 3];
+      }
+      const c = document.createElement('canvas'); c.width = fd.width; c.height = fd.height; c.getContext('2d').putImageData(fd, 0, 0);
+      if (centreFromHeel === null) centreFromHeel = (m.footX - heel) * s;  // from the first frame of the first animation (idle)
+      const ax = a.anchor === 'centre' ? (m.footX - f.x0) * s : (heel - f.x0) * s + centreFromHeel;
+      frames.push({ c, w: Math.ceil(fd.width * s), h: Math.ceil(fd.height * s), ax, ay: (m.sole - f.y0 + 1) * s });
+    });
+    const pad = 4, W = frames.reduce((t, f) => t + f.w + pad, pad), H = Math.max(...frames.map(f => f.h)) + pad * 2;
+    const strip = document.createElement('canvas'); strip.width = W; strip.height = H;
+    const g = strip.getContext('2d'); g.imageSmoothingQuality = 'high';
+    let x = pad; const rects = [];
+    for (const f of frames) { g.drawImage(f.c, x, pad, f.w, f.h); rects.push([x, pad, f.w, f.h, +f.ax.toFixed(1), +f.ay.toFixed(1)]); x += f.w + pad; }
+    const blob = await new Promise(r => strip.toBlob(r, 'image/webp', quality));
+    await put(out + name + '.webp', blob, 'image/webp');
+    index.anims[name] = { file:name + '.webp', frames:rects, kb:Math.round(blob.size / 1024) };
+  }
+  await put(out + 'index.json', JSON.stringify(index, null, 1), 'application/json');
+  return index;
+}
+
+window.prep = { load, pixels, bgStats, clearBackground, sliceFrames, splitFrames, measure, hairArea, rearHeel, build };
+</script>
