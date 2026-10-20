@@ -727,25 +727,65 @@ function loadArt(A) {
   img.onload = () => {
     const mk = () => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; return c; };
     const path = (g, pts) => { g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); };
-    const cut = pts => { const c = mk(), g = c.getContext('2d'); path(g, pts); g.clip(); g.drawImage(img, 0, 0); return c; };
+    // Pieces are cut 1.5px wider than the holes they leave, so their soft edges overlap and no seam shows.
+    const cut = pts => {
+      const m = mk(), mg = m.getContext('2d');
+      path(mg, pts); mg.lineWidth = 3; mg.lineJoin = 'round'; mg.fill(); mg.stroke();
+      const c = mk(), g = c.getContext('2d');
+      g.drawImage(img, 0, 0); g.globalCompositeOperation = 'destination-in'; g.drawImage(m, 0, 0);
+      return c;
+    };
     const legs = mk(), lg = legs.getContext('2d');
     lg.beginPath(); lg.rect(0, A.waist - 2, img.width, img.height); lg.clip(); lg.drawImage(img, 0, 0);
     const torso = mk(), tg = torso.getContext('2d');
     tg.save(); tg.beginPath(); tg.rect(0, 0, img.width, A.waist + 12); tg.clip(); tg.drawImage(img, 0, 0); tg.restore();
     tg.globalCompositeOperation = 'destination-out';
     for (const k of ['RU', 'RF', 'LU', 'LF']) { path(tg, A[k]); tg.fill(); }
-    tg.globalCompositeOperation = 'destination-over';
-    const grad = tg.createLinearGradient(150, 120, 240, 250);
-    grad.addColorStop(0, A.fill[0]); grad.addColorStop(1, A.fill[1]);
-    path(tg, A.under); tg.fillStyle = grad; tg.fill();
+    // The skin fill lives on its own layer at the very back, so it shows only through holes and never covers the far arm.
+    // It is painted by growing the surrounding chest colours inward, so it carries the art's shading.
+    const under = mk(), ug = under.getContext('2d');
+    path(ug, A.under); ug.fillStyle = A.fill[0]; ug.fill();
+    inpaint(torso, under);
     const ang = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
-    A.layers = { legs, torso,
+    A.layers = { legs, torso, under,
       RU:{ cv:cut(A.RU), pivot:A.RS, rest:ang(A.RS, A.RE) }, RF:{ cv:cut(A.RF), pivot:A.RE, rest:ang(A.RE, A.RG) },
       LU:{ cv:cut(A.LU), pivot:A.LS, rest:ang(A.LS, A.LE) }, LF:{ cv:cut(A.LF), pivot:A.LE, rest:ang(A.LE, A.LG) } };
   };
   img.src = A.src;
 }
 for (const k in STYLES) if (STYLES[k].art) loadArt(STYLES[k].art);
+
+// Fills the masked area of `region` with colours spread inward from the opaque pixels of `src`, one ring per pass.
+function inpaint(src, region) {
+  const w = src.width, h = src.height;
+  const s = src.getContext('2d').getImageData(0, 0, w, h).data;
+  const rg = region.getContext('2d'), out = rg.getImageData(0, 0, w, h), o = out.data;
+  const done = new Uint8Array(w * h), todo = [];
+  const skinTone = i => s[i * 4] > 150 && s[i * 4] > s[i * 4 + 2] + 40;  // only skin seeds, so outlines and gloves don't smear
+  for (let i = 0; i < w * h; i++) {
+    if (s[i * 4 + 3] > 200) { if (skinTone(i)) done[i] = 1; o[i * 4] = s[i * 4]; o[i * 4 + 1] = s[i * 4 + 1]; o[i * 4 + 2] = s[i * 4 + 2]; }
+    else if (o[i * 4 + 3]) todo.push(i);
+  }
+  let left = todo;
+  while (left.length) {
+    const next = [], ready = [];
+    for (const i of left) {
+      const x = i % w; let r = 0, g = 0, b = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const j = i + dy * w + dx;
+        if ((dx || dy) && x + dx >= 0 && x + dx < w && j >= 0 && j < w * h && done[j] === 1) { r += o[j * 4]; g += o[j * 4 + 1]; b += o[j * 4 + 2]; n++; }
+      }
+      if (n) ready.push([i, r / n, g / n, b / n]); else next.push(i);
+    }
+    if (!ready.length) break;
+    for (const [i, r, g, b] of ready) { o[i * 4] = r; o[i * 4 + 1] = g; o[i * 4 + 2] = b; o[i * 4 + 3] = 255; done[i] = 1; }
+    left = next;
+  }
+  for (const i of todo) if (!done[i]) o[i * 4 + 3] = 0;
+  // keep only the filled hole pixels on this layer; everything else is drawn by the torso itself
+  for (let i = 0; i < w * h; i++) if (!todo.length || s[i * 4 + 3] > 200) o[i * 4 + 3] = 0;
+  rg.putImageData(out, 0, 0);
+}
 
 // Near the guard angle the art's own drawn angle wins, so the idle pose matches the painting exactly;
 // further away the pose's real angle takes over, so punches extend properly.
@@ -774,6 +814,7 @@ function drawArt(f) {
     ctx.save(); if (glow) { ctx.shadowColor = '#f2b632'; ctx.shadowBlur = 22; }
     ctx.translate(ex, ey); ctx.rotate(rf); ctx.translate(-ex0, -ey0); ctx.drawImage(F.cv, 0, 0); ctx.restore();
   };
+  ctx.drawImage(Ly.under, 0, 0);
   arm(Ly.LU, Ly.LF, p.aL1, p.aL2, GUARD.aL1, GUARD.aL2, A.aim.L);
   ctx.drawImage(Ly.torso, 0, 0);
   if (f.flash > 0) { ctx.globalAlpha = f.flash * .45; ctx.globalCompositeOperation = 'lighter'; ctx.drawImage(Ly.torso, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; }
