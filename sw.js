@@ -1,5 +1,5 @@
 // Offline support: the game shell is cached on install; fonts are cached the first time they load.
-const CACHE = 'bell-to-bell-v4';
+const CACHE = 'bell-to-bell-v5';
 const JACK = ['idle', 'walk', 'slip', 'jab', 'jab-stiff', 'cross', 'hook', 'upper', 'hit', 'down', 'block', 'body-cross',
   'stunned', 'get-up', 'win', 'body-jab', 'block-hit', 'body-upper', 'body-hook', 'lose'].map(n => 'art/jack/' + n + '.webp');
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png',
