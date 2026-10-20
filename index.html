@@ -171,12 +171,31 @@ const ART_BLUE = {
   LF:[[226,112],[262,106],[288,124],[288,192],[270,234],[238,246],[236,200],[228,176]],
 };
 
+/* Layered version of the same boxer: `body` is him with no arms (complete chest), `arms` is the same
+   image with arms. Both sit on flat green. The arm pixels are found where the two images differ, then
+   each arm is split at the elbow by the region polygons. `cap` is the near shoulder, redrawn over the
+   near upper arm so its top end tucks under the deltoid. */
+const ART_BLUE_LAYERED = {
+  layered:true, body:'art/blue/body.webp', arms:'art/blue/arms.webp',
+  k:.2, origin:[470, 1505], hip:[425, 690], waist:712,
+  aim:{ R:.15, L:.05 }, turn:{ R:.12, L:.04 },
+  leanScale:.55,  // this taller figure tips further for the same lean, so it leans a little over half as much
+  RS:[305,410], RE:[205,590], RG:[490,500], LS:[665,420], LE:[720,593], LG:[884,454],
+  RU:[[130,420],[250,425],[345,430],[400,470],[340,505],[210,520],[195,600],[130,650]],
+  RF:[[160,660],[175,560],[210,512],[340,498],[400,460],[430,380],[600,380],[600,600],[440,650],[160,670]],
+  // skin over skin doesn't show up as a difference, so the near upper arm's inside is marked by hand
+  RUcore:[[188,440],[250,425],[335,435],[345,470],[330,508],[215,518],[205,585],[186,595],[176,520]],
+  LU:[[610,430],[760,430],[790,460],[745,540],[735,660],[690,660],[640,560],[610,480]],
+  LF:[[690,600],[760,540],[800,470],[840,380],[1000,320],[1000,620],[780,620],[740,680],[690,680]],
+  cap:[[225,330],[300,305],[390,320],[410,380],[390,440],[330,455],[260,450],[225,420]],
+};
+
 const STYLES = {
   speed:    { name:'Rico Vane',  nick:'The Wire',    label:'Speed',    spd:1.22, dmg:.82, move:1.25, stamCost:.85,
               trunks:'#2ec4b6', trim:'#e9fffb', gloves:'#0f6f6a', skin:'#c68642', hair:'#1b1410', stats:[5,2,4],
               sig:{ name:'Wire Flurry', fast:1.5, seq:[['jab',5],['cross',5],['jab',5],['cross',6],['hook',8]] } },
   balanced: { name:'Dani Holt',  nick:'Lighthouse',  label:'Balanced', spd:1, dmg:1, move:1.05, stamCost:1,
-              trunks:'#2457d6', trim:'#f2b632', gloves:'#1f4fc4', skin:'#eab07a', hair:'#e8c547', stats:[4,3,4], art:ART_BLUE,
+              trunks:'#2457d6', trim:'#f2b632', gloves:'#1f4fc4', skin:'#eab07a', hair:'#e8c547', stats:[4,3,4], art:ART_BLUE_LAYERED,
               sig:{ name:'Crossfire', seq:[['cross',13],['hook',17]] } },
   power:    { name:'Otis Crane', nick:'Big Weather', label:'Power',    spd:.86, dmg:1.35, move:.9, stamCost:1.15,
               trunks:'#e63946', trim:'#ffd6d9', gloves:'#2d2d2d', skin:'#7a4a24', hair:'#0d0b0a', stats:[2,5,3],
@@ -753,7 +772,81 @@ function loadArt(A) {
   };
   img.src = A.src;
 }
-for (const k in STYLES) if (STYLES[k].art) loadArt(STYLES[k].art);
+for (const k in STYLES) if (STYLES[k].art) (STYLES[k].art.layered ? loadLayeredArt : loadArt)(STYLES[k].art);
+
+// Removes a flat green background and the green tint it leaves on edges.
+function keyGreen(d) {
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2], m = Math.max(r, b), over = g - m;
+    if (over > 45) d[i + 3] = 0;
+    else if (over > 12) d[i + 3] = Math.round(255 * (1 - (over - 12) / 33));
+    if (g > m) d[i + 1] = m;
+  }
+}
+// Grows (max) or shrinks (min) a 0/1 mask by radius r, as two 1D passes.
+function morph(m, w, h, r, grow) {
+  const t = new Uint8Array(m.length), o = new Uint8Array(m.length), want = grow ? 1 : 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 1 - want;
+    for (let k = -r; k <= r && v !== want; k++) { const xx = x + k; if (xx >= 0 && xx < w && m[y * w + xx] === want) v = want; }
+    t[y * w + x] = v;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let v = 1 - want;
+    for (let k = -r; k <= r && v !== want; k++) { const yy = y + k; if (yy >= 0 && yy < h && t[yy * w + x] === want) v = want; }
+    o[y * w + x] = v;
+  }
+  return o;
+}
+function loadLayeredArt(A) {
+  const bodyImg = new Image(), armsImg = new Image();
+  let left = 2;
+  const ready = () => { if (--left) return; buildLayered(A, bodyImg, armsImg); };
+  bodyImg.onload = ready; armsImg.onload = ready;
+  bodyImg.src = A.body; armsImg.src = A.arms;
+}
+function buildLayered(A, bodyImg, armsImg) {
+  const w = bodyImg.width, h = bodyImg.height;
+  const mk = () => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  const path = (g, pts) => { g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); };
+  const pixels = img => { const c = mk(), g = c.getContext('2d'); g.drawImage(img, 0, 0); return g.getImageData(0, 0, w, h); };
+  const bodyData = pixels(bodyImg), armsData = pixels(armsImg), B = bodyData.data, R = armsData.data;
+  // where the arms image differs from the armless body = arm pixels; clean specks, fill gaps, soften
+  let mask = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const j = i * 4;
+    mask[i] = Math.abs(B[j] - R[j]) + Math.abs(B[j + 1] - R[j + 1]) + Math.abs(B[j + 2] - R[j + 2]) > 90 ? 1 : 0;
+  }
+  mask = morph(morph(mask, w, h, 3, false), w, h, 3, true);
+  mask = morph(morph(mask, w, h, 8, true), w, h, 8, false);
+  keyGreen(B); keyGreen(R);
+  const maskCv = mk(), mg = maskCv.getContext('2d'), md = mg.createImageData(w, h);
+  for (let i = 0; i < w * h; i++) md.data[i * 4 + 3] = mask[i] * 255;
+  mg.putImageData(md, 0, 0);
+  const soft = mk(), sg = soft.getContext('2d'); sg.filter = 'blur(1.5px)'; sg.drawImage(maskCv, 0, 0);
+  const bodyCv = mk(); bodyCv.getContext('2d').putImageData(bodyData, 0, 0);
+  const armsCv = mk(); armsCv.getContext('2d').putImageData(armsData, 0, 0);
+  const piece = (pts, core) => {
+    const m = mk(), mg2 = m.getContext('2d');
+    mg2.drawImage(soft, 0, 0);
+    if (core) { path(mg2, core); mg2.fill(); }
+    mg2.globalCompositeOperation = 'destination-in'; path(mg2, pts); mg2.fill();
+    const c = mk(), g = c.getContext('2d');
+    g.drawImage(armsCv, 0, 0);
+    g.globalCompositeOperation = 'destination-in'; g.drawImage(m, 0, 0);
+    return c;
+  };
+  const legs = mk(), lg = legs.getContext('2d');
+  lg.beginPath(); lg.rect(0, A.waist - 4, w, h); lg.clip(); lg.drawImage(bodyCv, 0, 0);
+  const torso = mk(), tg = torso.getContext('2d');
+  tg.beginPath(); tg.rect(0, 0, w, A.waist + 30); tg.clip(); tg.drawImage(bodyCv, 0, 0);
+  const cap = mk(), cg = cap.getContext('2d');
+  path(cg, A.cap); cg.clip(); cg.drawImage(bodyCv, 0, 0);
+  const ang = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
+  A.layers = { legs, torso, cap, farBehind:true,
+    RU:{ cv:piece(A.RU, A.RUcore), pivot:A.RS, rest:ang(A.RS, A.RE) }, RF:{ cv:piece(A.RF), pivot:A.RE, rest:ang(A.RE, A.RG) },
+    LU:{ cv:piece(A.LU), pivot:A.LS, rest:ang(A.LS, A.LE) }, LF:{ cv:piece(A.LF), pivot:A.LE, rest:ang(A.LE, A.LG) } };
+}
 
 // Fills the masked area of `region` with colours spread inward from the opaque pixels of `src`, one ring per pass.
 function inpaint(src, region) {
@@ -798,27 +891,40 @@ function drawArt(f) {
   const A = f.st.art, Ly = A.layers, p = f.pose, k = A.k, [ox, oy] = A.origin, [hx, hy] = A.hip;
   const ext = (t, g) => Math.min(1, Math.abs(t - g) / .9);
   const cr = (p.crouch - GUARD.crouch) * 30 / k;
-  const lean = p.lean - GUARD.lean + A.turn.R * ext(p.aR1, GUARD.aR1) + A.turn.L * ext(p.aL1, GUARD.aL1);
+  const lean = (p.lean - GUARD.lean) * (A.leanScale || 1) + A.turn.R * ext(p.aR1, GUARD.aR1) + A.turn.L * ext(p.aL1, GUARD.aL1);
   const glow = f.sp >= 100 || (f.atk && f.atk.seq[0].sig);
   ctx.save();
   ctx.translate(0, FLOOR); ctx.scale(k, k); ctx.translate(-ox, -oy);
   const legH = oy - A.waist, sy = Math.max(.7, (legH - cr) / legH);
   ctx.save(); ctx.translate(0, oy); ctx.scale(1, sy); ctx.translate(0, -oy); ctx.drawImage(Ly.legs, 0, 0); ctx.restore();
   ctx.translate(hx + p.dx / k, hy + cr); ctx.rotate(lean); ctx.translate(-hx, -hy);
+  // Works out both pieces of one arm; returns the two draw calls so layers can be interleaved.
   const arm = (U, F, a1, a2, g1, g2, aim) => {
     const r1 = blendAngle(a1, g1, U.rest, aim) - U.rest - lean;
     const rf = blendAngle(a1 + a2, g1 + g2, F.rest, aim) - F.rest - lean;
     const [sx, sy2] = U.pivot, [ex0, ey0] = F.pivot, c = Math.cos(r1), s = Math.sin(r1);
     const ex = sx + c * (ex0 - sx) - s * (ey0 - sy2), ey = sy2 + s * (ex0 - sx) + c * (ey0 - sy2);
-    ctx.save(); ctx.translate(sx, sy2); ctx.rotate(r1); ctx.translate(-sx, -sy2); ctx.drawImage(U.cv, 0, 0); ctx.restore();
-    ctx.save(); if (glow) { ctx.shadowColor = '#f2b632'; ctx.shadowBlur = 22; }
-    ctx.translate(ex, ey); ctx.rotate(rf); ctx.translate(-ex0, -ey0); ctx.drawImage(F.cv, 0, 0); ctx.restore();
+    return {
+      upper() { ctx.save(); ctx.translate(sx, sy2); ctx.rotate(r1); ctx.translate(-sx, -sy2); ctx.drawImage(U.cv, 0, 0); ctx.restore(); },
+      fore() {
+        ctx.save(); if (glow) { ctx.shadowColor = '#f2b632'; ctx.shadowBlur = 22; }
+        ctx.translate(ex, ey); ctx.rotate(rf); ctx.translate(-ex0, -ey0); ctx.drawImage(F.cv, 0, 0); ctx.restore();
+      },
+    };
   };
-  ctx.drawImage(Ly.under, 0, 0);
-  arm(Ly.LU, Ly.LF, p.aL1, p.aL2, GUARD.aL1, GUARD.aL2, A.aim.L);
-  ctx.drawImage(Ly.torso, 0, 0);
-  if (f.flash > 0) { ctx.globalAlpha = f.flash * .45; ctx.globalCompositeOperation = 'lighter'; ctx.drawImage(Ly.torso, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; }
-  arm(Ly.RU, Ly.RF, p.aR1, p.aR2, GUARD.aR1, GUARD.aR2, A.aim.R);
+  const L = arm(Ly.LU, Ly.LF, p.aL1, p.aL2, GUARD.aL1, GUARD.aL2, A.aim.L);
+  const R = arm(Ly.RU, Ly.RF, p.aR1, p.aR2, GUARD.aR1, GUARD.aR2, A.aim.R);
+  const torso = () => {
+    ctx.drawImage(Ly.torso, 0, 0);
+    if (f.flash > 0) { ctx.globalAlpha = f.flash * .45; ctx.globalCompositeOperation = 'lighter'; ctx.drawImage(Ly.torso, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; }
+  };
+  if (Ly.farBehind) {
+    // layered art: far upper arm tucks behind the body, the near upper arm under the near shoulder cap
+    L.upper(); torso(); L.fore(); R.upper(); ctx.drawImage(Ly.cap, 0, 0); R.fore();
+  } else {
+    ctx.drawImage(Ly.under, 0, 0);
+    L.upper(); L.fore(); torso(); R.upper(); R.fore();
+  }
   ctx.restore();
 }
 
